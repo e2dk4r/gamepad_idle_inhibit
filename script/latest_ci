@@ -1,0 +1,19 @@
+#!/bin/sh
+# https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository
+runs=https://api.github.com/repos/e2dk4r/gamepad_idle_inhibit/actions/runs
+props=$(cat <<END
+id
+name
+head_branch
+head_sha
+display_title
+run_number
+html_url
+status
+conclusion
+END
+)
+jq_filter=".workflow_runs[0] | $(echo $props | sed 's/ /,./g' | sed 's/^/./')"
+
+curl -s "$runs" | jq "$jq_filter"
+
