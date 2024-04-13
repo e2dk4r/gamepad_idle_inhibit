@@ -1,6 +1,6 @@
 #!/bin/sh
 # https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository
-runs=https://api.github.com/repos/e2dk4r/gamepad_idle_inhibit/actions/runs
+runs=https://api.github.com/repos/e2dk4r/gamepad_idle_inhibit/actions/runs?per_page=1
 props=$(cat <<END
 id
 name
