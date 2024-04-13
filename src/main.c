@@ -223,8 +223,8 @@ main(void)
   struct memory_chunk *MemoryForDeviceOpenEvents = mem_push_chunk(&memory_block, sizeof(struct op_device_open), 10);
   struct memory_chunk *MemoryForJoystickReadEvents =
       mem_push_chunk(&memory_block, sizeof(struct op_joystick_read), 256);
-  printf("total memory usage (in bytes):  %llu\n", memory_block.used);
-  printf("total memory wasted (in bytes): %llu\n", memory_block.total - memory_block.used);
+  printf("total memory usage (in bytes):  %lu\n", memory_block.used);
+  printf("total memory wasted (in bytes): %lu\n", memory_block.total - memory_block.used);
 
   /* io_uring */
   struct io_uring ring;
