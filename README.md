@@ -1,6 +1,6 @@
 # gamepad_idle_inhibit
 
-Prevent idling for 5 minutes (300 seconds) on any gamepad events on wayland.
+Prevent idling for 30 seconds on any gamepad events on wayland.
 
 For this to work your wayland compositor must support "idle-inhibit-unstable-v1".
 

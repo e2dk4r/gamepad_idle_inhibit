@@ -182,7 +182,7 @@ main(void)
 {
   int error_code = 0;
   struct wl_context context = {};
-  u64 timeout = 300;
+  u64 timeout = 30;
 
   /* wayland */
   context.wl_display = wl_display_connect(0);
