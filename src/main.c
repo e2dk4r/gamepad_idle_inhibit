@@ -524,6 +524,7 @@ main(void)
         info("timer set\n");
         context.zwp_idle_inhibitor_v1 =
             zwp_idle_inhibit_manager_v1_create_inhibitor(context.zwp_idle_inhibit_manager_v1, context.wl_surface);
+        wl_surface_commit(context.wl_surface);
       }
 
       struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
@@ -563,6 +564,7 @@ main(void)
 
       info("idled\n");
       zwp_idle_inhibitor_v1_destroy(context.zwp_idle_inhibitor_v1);
+      wl_surface_commit(context.wl_surface);
       context.zwp_idle_inhibitor_v1 = 0;
     }
 
