@@ -22,6 +22,7 @@ SLOT="0"
 DEPEND="
   dev-libs/wayland
   sys-libs/liburing
+  dev-libs/libevdev
 "
 RDEPEND="${DEPEND}"
 BDEPEND="
