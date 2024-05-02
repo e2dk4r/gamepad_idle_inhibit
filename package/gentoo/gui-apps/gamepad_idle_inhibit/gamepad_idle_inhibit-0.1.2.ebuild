@@ -19,7 +19,10 @@ fi
 LICENSE="MIT"
 SLOT="0"
 
-DEPEND="dev-libs/wayland"
+DEPEND="
+  dev-libs/wayland
+  sys-libs/liburing
+"
 RDEPEND="${DEPEND}"
 BDEPEND="
 	>=dev-libs/wayland-protocols-1.27
