@@ -6,9 +6,17 @@ project(
   default_options: 'c_std=c99'
 )
 
-add_project_arguments([
-  '-funroll-loops',
-  '-fomit-frame-pointer',
+is_build_debug = get_option('buildtype').startswith('debug')
+cc = meson.get_compiler('c')
+
+add_project_arguments(
+  [
+    '-funroll-loops',
+    '-fomit-frame-pointer',
+
+    '-DCOMPILER_GCC=' + (cc.get_id() == 'gcc').to_int().to_string(),
+    '-DCOMPILER_CLANG=' + (cc.get_id() == 'clang').to_int().to_string(),
+    '-DGAMEPAD_IDLE_INHIBIT_DEBUG=' + is_build_debug.to_int().to_string(),
   ],
   language: 'c'
 )

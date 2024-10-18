@@ -13,7 +13,7 @@ Forked from https://github.com/e2dk4r/gamepad and adapted to wayland.
 
 # requirements
 
-- 23 + 9 kilobytes of memory
+- Whopping 24 + 1 kilobytes of memory
 - Wayland compositor that supports [idle-inhibit-unstable-v1](https://wayland.app/protocols/idle-inhibit-unstable-v1#compositor-support)
 
 # libraries
