@@ -13,6 +13,11 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+// NOTE: CI fix
+#ifndef IORING_ASYNC_CANCEL_ALL
+#define IORING_ASYNC_CANCEL_ALL (1U << 0)
+#endif
+
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
 #define assert(x)                                                                                                      \
   if (!(x)) {                                                                                                          \
