@@ -353,11 +353,6 @@ main(void)
     if (!(path[0] == 'e' && path[1] == 'v' && path[2] == 'e' && path[3] == 'n' && path[4] == 't'))
       continue;
 
-    if (path[5] == '2' && path[6] == '0') {
-      int breakHere = 32;
-      (void)breakHere;
-    }
-
     struct op_joystick_poll stagedOp = {
         .type = OP_JOYSTICK_POLL,
     };
