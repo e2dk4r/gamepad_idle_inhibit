@@ -420,9 +420,13 @@ main(void)
   wait:
     error = io_uring_wait_cqe(&ring, &cqe);
     if (error) {
-      if (errno == EAGAIN)
+      error *= -1;
+      if (error == EAGAIN || error == EINTR)
         goto wait;
       fatal("io_uring\n");
+#if GAMEPAD_IDLE_INHIBIT_DEBUG
+      printf("errno: %d %s\n", -error, strerror(-error));
+#endif
       error_code = GAMEPAD_ERROR_IO_URING_WAIT;
       break;
     }
