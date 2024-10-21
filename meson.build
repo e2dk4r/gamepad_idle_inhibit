@@ -2,7 +2,7 @@ project(
   'gamepad_idle_inhibit',
   'c',
   license: 'MIT',
-  version: '0.2.1',
+  version: '0.2.2',
   default_options: 'c_std=c99'
 )
 
