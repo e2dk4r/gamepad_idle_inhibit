@@ -17,6 +17,12 @@
 #define IORING_ASYNC_CANCEL_ALL (1U << 0)
 #endif
 
+#if __has_builtin(__builtin_alloca)
+#define alloca(size) __builtin_alloca(size)
+#else
+#error alloca must be supported
+#endif
+
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
 #define assert(x)                                                                                                      \
   if (!(x)) {                                                                                                          \
@@ -274,7 +280,8 @@ main(void)
 
   // TODO: make maxSupportedControllers configurable
   u32 maxSupportedControllers = 4;
-  struct gamepad gamepads[maxSupportedControllers] = {};
+  struct gamepad *gamepads = alloca(maxSupportedControllers * sizeof(*gamepads));
+  bzero(gamepads, maxSupportedControllers * sizeof(*gamepads));
 
   /* wayland */
   context.wl_display = wl_display_connect(0);
@@ -462,7 +469,7 @@ main(void)
     stagedOp.triggerMinimum = triggerAbsInfo.minimum;
 
     printf("Input device ID: bus %#x vendor %#x product %#x\n", id.bustype, id.vendor, id.product);
-    stagedOp.gamepad = GamepadGetNotConnected(gamepads, ARRAY_COUNT(gamepads));
+    stagedOp.gamepad = GamepadGetNotConnected(gamepads, maxSupportedControllers);
     if (!stagedOp.gamepad) {
       warning("Maximum number of gamepads connected! So not registering this one.\n");
       close(stagedOp.fd);
@@ -678,7 +685,7 @@ main(void)
       stagedOp.triggerMinimum = triggerAbsInfo.minimum;
 
       printf("Input device ID: bus %#x vendor %#x product %#x\n", id.bustype, id.vendor, id.product);
-      stagedOp.gamepad = GamepadGetNotConnected(gamepads, ARRAY_COUNT(gamepads));
+      stagedOp.gamepad = GamepadGetNotConnected(gamepads, maxSupportedControllers);
       if (!stagedOp.gamepad) {
         warning("Maximum number of gamepads connected! So not registering this one.\n");
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
