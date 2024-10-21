@@ -3,7 +3,6 @@
 
 #include <dirent.h>
 #include <fcntl.h>
-#include <libevdev/libevdev.h>
 #include <liburing.h>
 #include <linux/input.h>
 #include <stdio.h>
@@ -32,17 +31,27 @@
     __builtin_trap();                                                                                                  \
   }
 
+#define ARRAY_COUNT(array) (sizeof(array) / sizeof(array[0]))
+
 #include "idle-inhibit-unstable-v1-client-protocol.h"
 
 #define POLLIN 0x001  /* There is data to read.  */
 #define POLLPRI 0x002 /* There is urgent data to read.  */
 #define POLLOUT 0x004 /* Writing now will not block.  */
 
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
+typedef __INT8_TYPE__ s8;
+typedef __INT16_TYPE__ s16;
+typedef __INT32_TYPE__ s32;
+typedef __INT64_TYPE__ s64;
+
+typedef __UINT8_TYPE__ u8;
+typedef __UINT16_TYPE__ u16;
+typedef __UINT32_TYPE__ u32;
+typedef __UINT64_TYPE__ u64;
 typedef u8 b8;
+
+typedef float f32;
+typedef double f64;
 
 #define OP_INOTIFY_WATCH (1 << 0)
 #define OP_DEVICE_OPEN (1 << 1)
@@ -91,9 +100,61 @@ struct op_inotify_watch {
   int fd;
 };
 
+struct gamepad {
+  b8 isConnected : 1;
+  b8 isEventIgnored : 1;
+
+  b8 a : 1;
+  b8 b : 1;
+  b8 x : 1;
+  b8 y : 1;
+
+  b8 back : 1;
+  b8 start : 1;
+  b8 home : 1;
+
+  b8 ls : 1;
+  b8 rs : 1;
+
+  // xbox
+  b8 lb : 1;
+  b8 rb : 1;
+
+  // [0, 1] math coordinates
+  f32 lsX;
+  // [0, 1] math coordinates
+  f32 lsY;
+  // [0, 1] math coordinates
+  f32 rsX;
+  // [0, 1] math coordinates
+  f32 rsY;
+
+  // [0, 1] math coordinates
+  f32 lt;
+  // [0, 1] math coordinates
+  f32 rt;
+};
+
+static struct gamepad *
+GamepadGetNotConnected(struct gamepad *gamepads, u32 count)
+{
+  for (u32 index = 0; index < count; index++) {
+    struct gamepad *gamepad = gamepads + index;
+    if (gamepad->isConnected == 0)
+      return gamepad;
+  }
+
+  return 0;
+}
+
 struct op_joystick_poll {
   u8 type;
   int fd;
+  s32 stickRange;
+  s32 stickMinimum;
+  s32 triggerRange;
+  s32 triggerMinimum;
+  struct gamepad *gamepad;
 };
 
 struct op_joystick_read {
@@ -169,14 +230,6 @@ mem_push_chunk(struct memory_block *mem, u64 size, u64 max)
   return chunk;
 }
 
-static inline u8
-libevdev_is_gamepad(struct libevdev *evdev)
-{
-  // see: https://www.kernel.org/doc/Documentation/input/gamepad.txt
-  //      3. Detection
-  return libevdev_has_event_type(evdev, EV_KEY) && libevdev_has_event_code(evdev, EV_KEY, BTN_GAMEPAD);
-}
-
 struct wl_context {
   struct wl_display *wl_display;
   struct wl_compositor *wl_compositor;
@@ -219,6 +272,10 @@ main(void)
   u64 timeout = 30;
 #endif
 
+  // TODO: make maxSupportedControllers configurable
+  u32 maxSupportedControllers = 4;
+  struct gamepad gamepads[maxSupportedControllers] = {};
+
   /* wayland */
   context.wl_display = wl_display_connect(0);
   if (!context.wl_display) {
@@ -255,8 +312,6 @@ main(void)
     goto wayland_exit;
   }
 
-  // TODO: make maxSupportedControllers configurable
-  u32 maxSupportedControllers = 4;
   struct memory_chunk *MemoryForDeviceOpenEvents =
       mem_push_chunk(&memory_block, sizeof(struct op), maxSupportedControllers);
   struct memory_chunk *MemoryForJoystickPollEvents =
@@ -363,33 +418,59 @@ main(void)
       continue;
     }
 
-    struct libevdev *evdev = libevdev_new();
-    if (!evdev) {
-      warning("libevdev\n");
+    // - get device id, capibilities
+    struct input_id id;
+    u8 evBits[(EV_CNT + 7) / 8];
+    u8 keyBits[(KEY_CNT + 7) / 8];
+    u8 absBits[(ABS_CNT + 7) / 8];
+    if (/* get id */
+        ioctl(stagedOp.fd, EVIOCGID, &id) < 0 ||
+        /* get bits */
+        ioctl(stagedOp.fd, EVIOCGBIT(0, sizeof(evBits)), evBits) < 0 ||
+        ioctl(stagedOp.fd, EVIOCGBIT(EV_KEY, sizeof(keyBits)), keyBits) < 0 ||
+        ioctl(stagedOp.fd, EVIOCGBIT(EV_ABS, sizeof(absBits)), absBits) < 0) {
       close(stagedOp.fd);
-      continue;
-    }
-
-    if (libevdev_set_fd(evdev, stagedOp.fd) < 0) {
-      warning("libevdev failed\n");
-      close(stagedOp.fd);
-      libevdev_free(evdev);
       continue;
     }
 
     /* detect joystick */
-    b8 isGamepad = libevdev_is_gamepad(evdev);
-    if (isGamepad) {
-      printf("Input device name: \"%s\"\n", libevdev_get_name(evdev));
-      printf("Input device ID: bus %#x vendor %#x product %#x\n", libevdev_get_id_bustype(evdev),
-             libevdev_get_id_vendor(evdev), libevdev_get_id_product(evdev));
-    }
-    libevdev_free(evdev);
+    b8 isGamepad =
+        /* has KEY and ABS capibilities */
+        (evBits[EV_KEY / 8] & 1 << (EV_KEY % 8)) &&
+        (evBits[EV_ABS / 8] & 1 << (EV_ABS % 8))
+        /* and has BTN_GAMEPAD
+         * see: https://www.kernel.org/doc/Documentation/input/gamepad.txt
+         *      3. Detection
+         */
+        && (keyBits[BTN_GAMEPAD / 8] & 1 << (BTN_GAMEPAD % 8));
     if (!isGamepad) {
       close(stagedOp.fd);
       continue;
     }
 
+    // - get axes abs info
+    struct input_absinfo stickAbsInfo;
+    struct input_absinfo triggerAbsInfo;
+    if (ioctl(stagedOp.fd, EVIOCGABS(ABS_X), &stickAbsInfo) < 0 ||
+        ioctl(stagedOp.fd, EVIOCGABS(ABS_Z), &triggerAbsInfo) < 0) {
+      close(stagedOp.fd);
+      continue;
+    }
+    stagedOp.stickRange = stickAbsInfo.maximum - stickAbsInfo.minimum;
+    stagedOp.stickMinimum = stickAbsInfo.minimum;
+    stagedOp.triggerRange = triggerAbsInfo.maximum - triggerAbsInfo.minimum;
+    stagedOp.triggerMinimum = triggerAbsInfo.minimum;
+
+    printf("Input device ID: bus %#x vendor %#x product %#x\n", id.bustype, id.vendor, id.product);
+    stagedOp.gamepad = GamepadGetNotConnected(gamepads, ARRAY_COUNT(gamepads));
+    if (!stagedOp.gamepad) {
+      warning("Maximum number of gamepads connected! So not registering this one.\n");
+      close(stagedOp.fd);
+      continue;
+    }
+    stagedOp.gamepad->isConnected = 1;
+
+    // - Queue poll on gamepad for input event
     struct op_joystick_poll *submitOp = mem_chunk_push(MemoryForJoystickPollEvents);
     *submitOp = stagedOp;
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
@@ -541,23 +622,72 @@ main(void)
       };
 
       // - Detect if connected device is gamepad
-      struct libevdev *evdev;
-      int rc = libevdev_new_from_fd(stagedOp.fd, &evdev);
-      if (rc < 0) {
-        warning("libevdev failed\n");
-        goto error;
+      struct input_id id;
+      u8 evBits[(EV_CNT + 7) / 8];
+      u8 keyBits[(KEY_CNT + 7) / 8];
+      u8 absBits[(ABS_CNT + 7) / 8];
+      if (/* get id */
+          ioctl(stagedOp.fd, EVIOCGID, &id) < 0 ||
+          /* get bits */
+          ioctl(stagedOp.fd, EVIOCGBIT(0, sizeof(evBits)), evBits) < 0 ||
+          ioctl(stagedOp.fd, EVIOCGBIT(EV_KEY, sizeof(keyBits)), keyBits) < 0 ||
+          ioctl(stagedOp.fd, EVIOCGBIT(EV_ABS, sizeof(absBits)), absBits) < 0) {
+        // NOTE: When cannot get device capibilities
+        //   - Close file descriptor
+        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+        io_uring_prep_close(sqe, stagedOp.fd);
+        io_uring_sqe_set_data(sqe, 0);
+        io_uring_submit(&ring);
+        goto cqe_seen;
       }
 
       /* detect joystick */
-      if (!libevdev_is_gamepad(evdev)) {
-        warning("This device does not look like a gamepad\n");
-        goto error;
+      b8 isGamepad =
+          /* has KEY and ABS capibilities */
+          (evBits[EV_KEY / 8] & 1 << (EV_KEY % 8)) &&
+          (evBits[EV_ABS / 8] & 1 << (EV_ABS % 8))
+          /* and has BTN_GAMEPAD
+           * see: https://www.kernel.org/doc/Documentation/input/gamepad.txt
+           *      3. Detection
+           */
+          && (keyBits[BTN_GAMEPAD / 8] & 1 << (BTN_GAMEPAD % 8));
+      if (!isGamepad) {
+        // NOTE: When device is not gamepad
+        //   - Close file descriptor
+        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+        io_uring_prep_close(sqe, stagedOp.fd);
+        io_uring_sqe_set_data(sqe, 0);
+        io_uring_submit(&ring);
+        goto cqe_seen;
       }
 
-      printf("Input device name: \"%s\"\n", libevdev_get_name(evdev));
-      printf("Input device ID: bus %#x vendor %#x product %#x\n", libevdev_get_id_bustype(evdev),
-             libevdev_get_id_vendor(evdev), libevdev_get_id_product(evdev));
-      libevdev_free(evdev);
+      // - get axes abs info
+      struct input_absinfo stickAbsInfo;
+      struct input_absinfo triggerAbsInfo;
+      if (ioctl(stagedOp.fd, EVIOCGABS(ABS_X), &stickAbsInfo) < 0 ||
+          ioctl(stagedOp.fd, EVIOCGABS(ABS_Z), &triggerAbsInfo) < 0) {
+        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+        io_uring_prep_close(sqe, stagedOp.fd);
+        io_uring_sqe_set_data(sqe, 0);
+        io_uring_submit(&ring);
+        goto cqe_seen;
+      }
+      stagedOp.stickRange = stickAbsInfo.maximum - stickAbsInfo.minimum;
+      stagedOp.stickMinimum = stickAbsInfo.minimum;
+      stagedOp.triggerRange = triggerAbsInfo.maximum - triggerAbsInfo.minimum;
+      stagedOp.triggerMinimum = triggerAbsInfo.minimum;
+
+      printf("Input device ID: bus %#x vendor %#x product %#x\n", id.bustype, id.vendor, id.product);
+      stagedOp.gamepad = GamepadGetNotConnected(gamepads, ARRAY_COUNT(gamepads));
+      if (!stagedOp.gamepad) {
+        warning("Maximum number of gamepads connected! So not registering this one.\n");
+        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+        io_uring_prep_close(sqe, stagedOp.fd);
+        io_uring_sqe_set_data(sqe, 0);
+        io_uring_submit(&ring);
+        goto cqe_seen;
+      }
+      stagedOp.gamepad->isConnected = 1;
 
       // - Queue poll on gamepad for input event
       struct op_joystick_poll *submitOp = mem_chunk_push(MemoryForJoystickPollEvents);
@@ -568,18 +698,6 @@ main(void)
       io_uring_submit(&ring);
 
       goto cqe_seen;
-
-    error:
-      // NOTE: When device is not gamepad
-      //   - Release resources
-      if (evdev)
-        libevdev_free(evdev);
-
-      //   - Close file descriptor
-      sqe = io_uring_get_sqe(&ring);
-      io_uring_prep_close(sqe, stagedOp.fd);
-      io_uring_sqe_set_data(sqe, 0);
-      io_uring_submit(&ring);
     }
 
     /* on joystick poll events */
@@ -608,7 +726,10 @@ main(void)
         //   2 - Release resources
         mem_chunk_pop(MemoryForJoystickPollEvents, op);
 
-        //   3 - Stop trying to queue read joystick event
+        //   3 - Disconnect virtual gamepad
+        op->gamepad->isConnected = 0;
+
+        //   4 - Stop trying to queue read joystick event
         goto cqe_seen;
       }
 
@@ -652,6 +773,9 @@ main(void)
           mem_chunk_pop(MemoryForJoystickPollEvents, op_joystick_poll);
           mem_chunk_pop(MemoryForJoystickReadEvents, op);
 
+          //   4 - Disconnect virtual gamepad
+          op_joystick_poll->gamepad->isConnected = 0;
+
           //   3 - Stop polling on file descriptor
           goto cqe_seen;
         }
@@ -674,17 +798,129 @@ main(void)
       // NOTE: On joystick event
       struct input_event *event = &op->event;
 
+#if GAMEPAD_IDLE_INHIBIT_DEBUG
       printf("%p fd: %d time: %ld.%ld type: %d code: %d value: %d\n", op, op_joystick_poll->fd, event->input_event_sec,
              event->input_event_usec, event->type, event->code, event->value);
-      // if (event->code == BTN_SELECT && event->value == 1)
-      //   info("===> select pressed\n");
-      // else if (event->code == BTN_SELECT && event->value == 0)
-      //   info("===> select released\n");
+#endif
+      struct gamepad *gamepad = op_joystick_poll->gamepad;
+      if (event->type == EV_SYN) {
+        // see: https://www.kernel.org/doc/html/latest/input/event-codes.html#ev-syn
+        if (event->code == SYN_DROPPED)
+          gamepad->isEventIgnored = 1;
+        else if (event->code == SYN_REPORT)
+          gamepad->isEventIgnored = 0;
+      }
 
-      // else if (event->code == BTN_START && event->value == 1)
-      //   info("===> start pressed\n");
-      // else if (event->code == BTN_START && event->value == 0)
-      //   info("===> start released\n");
+      if (!gamepad->isEventIgnored) {
+        if (event->type == EV_KEY) {
+          b8 isPressed = event->value & 1;
+          switch (event->code) {
+          case BTN_A:
+            gamepad->a = isPressed;
+            break;
+          case BTN_B:
+            gamepad->b = isPressed;
+            break;
+          case BTN_X:
+            gamepad->x = isPressed;
+            break;
+          case BTN_Y:
+            gamepad->y = isPressed;
+            break;
+          case BTN_SELECT:
+            gamepad->back = isPressed;
+            break;
+          case BTN_START:
+            gamepad->start = isPressed;
+            break;
+          case BTN_MODE:
+            gamepad->home = isPressed;
+            break;
+          case BTN_THUMBL:
+            gamepad->ls = isPressed;
+            break;
+          case BTN_THUMBR:
+            gamepad->rs = isPressed;
+            break;
+          case BTN_TL:
+          case BTN_TL2:
+            gamepad->lb = isPressed;
+            break;
+          case BTN_TR:
+          case BTN_TR2:
+            gamepad->rb = isPressed;
+            break;
+          }
+        } else if (event->type == EV_ABS) {
+          switch (event->code) {
+          case ABS_HAT0X:
+          case ABS_HAT1X:
+          case ABS_HAT2X:
+          case ABS_HAT3X: {
+            gamepad->lsX = (f32)event->value;
+          } break;
+
+          case ABS_HAT0Y:
+          case ABS_HAT1Y:
+          case ABS_HAT2Y:
+          case ABS_HAT3Y: {
+            gamepad->lsY = (f32)-event->value;
+          } break;
+
+          case ABS_X:
+          case ABS_RX:
+          case ABS_Y:
+          case ABS_RY: {
+            s32 minimum = op_joystick_poll->stickMinimum;
+            s32 range = op_joystick_poll->stickRange;
+            f32 normal = (f32)(event->value - minimum) / (f32)range;
+            assert(normal >= 0.0f && normal <= 1.0f);
+            f32 unit = 2.0f * normal - 1.0f;
+            assert(unit >= -1.0f && unit <= 1.0f);
+
+            if (event->code == ABS_Y || event->code == ABS_RY)
+              unit *= -1;
+
+            f32 *stick = event->code == ABS_X    ? &gamepad->lsX
+                         : event->code == ABS_Y  ? &gamepad->lsY
+                         : event->code == ABS_RX ? &gamepad->rsX
+                         : event->code == ABS_RY ? &gamepad->rsY
+                                                 : 0;
+            assert(stick);
+            *stick = unit;
+          } break;
+
+          case ABS_Z:
+          case ABS_RZ: {
+            s32 minimum = op_joystick_poll->triggerMinimum;
+            s32 range = op_joystick_poll->triggerRange;
+            f32 normal = (f32)(event->value - minimum) / (f32)range;
+            assert(normal >= 0.0f && normal <= 1.0f);
+
+            f32 *trigger = event->code == ABS_Z ? &gamepad->lt : event->code == ABS_RZ ? &gamepad->rt : 0;
+            assert(trigger);
+            *trigger = normal;
+          } break;
+          }
+        }
+
+        printf("Gamepad #%p a: %d b: %d x: %d y: %d ls: %d %.2f,%.2f rs: %d %.2f,%.2f lb: %d lt: %.2f rb: %d rt: %.2f "
+               "home: %d back: %d start: %d\n",
+               // pointer
+               gamepad,
+               // buttons
+               gamepad->a, gamepad->b, gamepad->x, gamepad->y,
+               // left stick
+               gamepad->ls, gamepad->lsX, gamepad->lsY,
+               // right stick
+               gamepad->rs, gamepad->rsX, gamepad->rsY,
+               // left button, left trigger
+               gamepad->lb, gamepad->lt,
+               // right button, right trigger
+               gamepad->rb, gamepad->rt,
+               // buttons
+               gamepad->home, gamepad->back, gamepad->start);
+      }
 
       // NOTE: When there is more data to read
       //   1 - Try to read another joystick event

@@ -21,7 +21,6 @@ add_project_arguments(
   language: 'c'
 )
 
-libevdev = dependency('libevdev')
 liburing = dependency('liburing')
 wayland_client = dependency('wayland-client')
 wayland_protocols = dependency('wayland-protocols', native: true)
@@ -36,7 +35,6 @@ executable(
   'gamepad_idle_inhibit',
   sources: sources + wl_protocols_src,
   dependencies: [
-    libevdev,
     liburing,
     wayland_client,
   ],

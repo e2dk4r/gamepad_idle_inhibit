@@ -21,7 +21,6 @@ Forked from https://github.com/e2dk4r/gamepad and adapted to wayland.
 | library        | used for                            |
 |----------------|-------------------------------------|
 | liburing       | event loop and polling              |
-| libevdev       | detecting whether device is gamepad |
 | wayland-client | connecting to wayland display       |
 
 # build
