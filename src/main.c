@@ -280,8 +280,6 @@ main(void)
 
   // TODO: make maxSupportedControllers configurable
   u32 maxSupportedControllers = 4;
-  struct gamepad *gamepads = alloca(maxSupportedControllers * sizeof(*gamepads));
-  bzero(gamepads, maxSupportedControllers * sizeof(*gamepads));
 
   /* wayland */
   context.wl_display = wl_display_connect(0);
@@ -312,12 +310,16 @@ main(void)
   /* memory */
   struct memory_block memory_block = {};
   memory_block.total = 1 * KILOBYTES;
-  memory_block.block = mmap(0, (size_t)memory_block.total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  memory_block.block = alloca(memory_block.total);
+  bzero(memory_block.block, memory_block.total);
+  // mmap(0, (size_t)memory_block.total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (!memory_block.block) {
     fatal("you do not have 1k memory available.\n");
     error_code = GAMEPAD_ERROR_MEMORY;
     goto wayland_exit;
   }
+
+  struct gamepad *gamepads = mem_push(&memory_block, maxSupportedControllers * sizeof(*gamepads));
 
   struct memory_chunk *MemoryForDeviceOpenEvents =
       mem_push_chunk(&memory_block, sizeof(struct op), maxSupportedControllers);
