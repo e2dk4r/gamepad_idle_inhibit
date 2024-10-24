@@ -24,12 +24,12 @@
 #endif
 
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
-#define assert(x)                                                                                                      \
+#define debug_assert(x)                                                                                                \
   if (!(x)) {                                                                                                          \
     __builtin_debugtrap();                                                                                             \
   }
 #else
-#define assert(x)
+#define debug_assert(x)
 #endif
 
 #define runtime_assert(x)                                                                                              \
@@ -86,6 +86,13 @@ typedef double f64;
 #define GAMEPAD_ERROR_WAYLAND_REGISTRY 51
 #define GAMEPAD_ERROR_WAYLAND_EXTENSION 52
 #define GAMEPAD_ERROR_WAYLAND_FD 53
+
+#define GAMEPAD_ERROR_ARGUMENT_MISSING 9000
+#define GAMEPAD_ERROR_ARGUMENT_UNKNOWN 9001
+#define GAMEPAD_ERROR_ARGUMENT_MUST_BE_POSITIVE_NUMBER 9002
+#define GAMEPAD_ERROR_ARGUMENT_MUST_BE_GRATER_THAN_0 9003
+#define GAMEPAD_ERROR_ARGUMENT_MUST_BE_GRATER 9004
+#define GAMEPAD_ERROR_ARGUMENT_MUST_BE_LESS 9005
 
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
 #define debug(str) write(STDERR_FILENO, "d: " str, 3 + sizeof(str) - 1)
@@ -216,7 +223,7 @@ mem_chunk_pop(struct memory_chunk *chunk, void *block)
 static void *
 mem_push(struct memory_block *mem, u64 size)
 {
-  assert(mem->used + size <= mem->total);
+  debug_assert(mem->used + size <= mem->total);
   void *result = mem->block + mem->used;
   mem->used += size;
   return result;
@@ -265,21 +272,137 @@ wl_registry_global_remove(void *data, struct wl_registry *wl_registry, u32 name)
 
 static const struct wl_registry_listener wl_registry_listener = {.global = wl_registry_global,
                                                                  .global_remove = wl_registry_global_remove};
+
+#include "text.h"
+
 int
-main(void)
+main(int argc, char *argv[])
 {
   int error_code = 0;
   struct wl_context context = {};
 
-  // TODO: Read timeout from command line arguments
+  struct duration timeout = (struct duration){.ns = 30 * 1e9L};
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
-  u64 timeout = 3;
-#else
-  u64 timeout = 30;
+  timeout = (struct duration){.ns = 3 * 1e9L};
 #endif
 
-  // TODO: make maxSupportedControllers configurable
-  u32 maxSupportedControllers = 4;
+  u32 maxGamepadCount = 4;
+
+  // parse commandline arguments
+  for (u64 argumentIndex = 1; argumentIndex < argc; argumentIndex++) {
+    struct string argument = StringFromZeroTerminated((u8 *)argv[argumentIndex]);
+
+#define ARGUMENT_STRING(variableName, zeroTerminatedString)                                                            \
+  static struct string variableName = {                                                                                \
+      .data = (u8 *)zeroTerminatedString,                                                                              \
+      .len = sizeof(zeroTerminatedString) - 1,                                                                         \
+  }
+    ARGUMENT_STRING(argumentTimeoutString, "--timeout");
+    ARGUMENT_STRING(argumentMaxGamepadCountString, "--max-gamepad-count");
+    ARGUMENT_STRING(argumentHelpShortString, "-h");
+    ARGUMENT_STRING(argumentHelpString, "--help");
+#undef ARGUMENT_STRING
+
+    // --timeout
+    if (IsStringEqual(&argument, &argumentTimeoutString)) {
+      b8 isArgumentWasLast = argumentIndex + 1 == argc;
+      if (isArgumentWasLast) {
+        fatal("timeout value is missing\n");
+        return GAMEPAD_ERROR_ARGUMENT_MISSING;
+      }
+
+      argumentIndex++;
+      struct string timeoutString = StringFromZeroTerminated((u8 *)argv[argumentIndex]);
+      struct duration parsed;
+      struct duration oneSecond = (struct duration){.ns = 1 * 1e9L};
+      struct duration oneDay = (struct duration){.ns = 60 * 60 * 24 * 1 * 1e9L};
+
+      if (!ParseDuration(&timeoutString, &parsed)) {
+        fatal("timeout must be positive number\n");
+        return GAMEPAD_ERROR_ARGUMENT_MUST_BE_POSITIVE_NUMBER;
+      } else if (IsDurationLessThan(&parsed, &oneSecond)) {
+        fatal("timeout must be bigger or equal than 1 second\n");
+        return GAMEPAD_ERROR_ARGUMENT_MUST_BE_GRATER;
+      } else if (IsDurationGraterThan(&parsed, &oneDay)) {
+        fatal("timeout must be less or equal 1 day\n");
+        return GAMEPAD_ERROR_ARGUMENT_MUST_BE_LESS;
+      }
+
+      timeout = parsed;
+    }
+
+    // --max-gamepad-count
+    else if (IsStringEqual(&argument, &argumentMaxGamepadCountString)) {
+      b8 isArgumentWasLast = argumentIndex + 1 == argc;
+      if (isArgumentWasLast) {
+        fatal("max-gamepad-count value is missing\n");
+        return GAMEPAD_ERROR_ARGUMENT_MISSING;
+      }
+
+      argumentIndex++;
+      struct string maxGamepadCountString = StringFromZeroTerminated((u8 *)argv[argumentIndex]);
+      if (!ParseU64(&maxGamepadCountString, (u64 *)&maxGamepadCount)) {
+        fatal("max-gamepad-count must be positive number\n");
+        return GAMEPAD_ERROR_ARGUMENT_MUST_BE_POSITIVE_NUMBER;
+      } else if (maxGamepadCount == 0) {
+        fatal("max-gamepad-count must be bigger than 0\n");
+        return GAMEPAD_ERROR_ARGUMENT_MUST_BE_GRATER_THAN_0;
+      } else if (maxGamepadCount > 256) {
+        fatal("max-gamepad-count must be less than 256\n");
+        return GAMEPAD_ERROR_ARGUMENT_MUST_BE_LESS;
+      }
+    }
+
+    // -h, --help
+    else if (IsStringEqual(&argument, &argumentHelpShortString) || IsStringEqual(&argument, &argumentHelpString)) {
+      static struct string helpString = {
+#define HELP_STRING_TEXT                                                                                               \
+  "NAME: "                                                                                                             \
+  "\n"                                                                                                                 \
+  "  gamepad_idle_inhibit - prevent idling wayland on controllers button presses"                                      \
+  "\n\n"                                                                                                               \
+  "SYNOPSIS: "                                                                                                         \
+  "\n"                                                                                                                 \
+  "  gamepad_idle_inhibit [OPTION]..."                                                                                 \
+  "\n\n"                                                                                                               \
+  "DESCIPTION: "                                                                                                       \
+  "\n"                                                                                                                 \
+  "  -t, --timeout [1sec,1day]\n"                                                                                      \
+  "    How much time need to elapse to idle.\n"                                                                        \
+  "    | Duration | Length      |\n"                                                                                   \
+  "    |----------|-------------|\n"                                                                                   \
+  "    | ns       | nanosecond  |\n"                                                                                   \
+  "    | us       | microsecond |\n"                                                                                   \
+  "    | ms       | millisecond |\n"                                                                                   \
+  "    | sec      | second      |\n"                                                                                   \
+  "    | min      | minute      |\n"                                                                                   \
+  "    | hr       | hour        |\n"                                                                                   \
+  "    | day      | day         |\n"                                                                                   \
+  "    | wk       | week        |\n"                                                                                   \
+  "    Default is 30sec."                                                                                              \
+  "\n\n"                                                                                                               \
+  "  --max-gamepad-count [1-256]\n"                                                                                    \
+  "    How many gamepads need to be tracked.\n"                                                                        \
+  "    Default is 4."                                                                                                  \
+  "\n\n"
+          .data = (u8 *)HELP_STRING_TEXT,
+          .len = sizeof(HELP_STRING_TEXT) - 1,
+#undef HELP_STRING_TEXT
+      };
+      write(STDOUT_FILENO, helpString.data, helpString.len);
+      return 0;
+    }
+
+    // unknown argument
+    else {
+      write(STDERR_FILENO, "e: Unknown '", 12);
+      write(STDERR_FILENO, argument.data, argument.len);
+      write(STDERR_FILENO, "' argument\n", 11);
+      return GAMEPAD_ERROR_ARGUMENT_UNKNOWN;
+    }
+  }
+
+  // TODO: handle SIGINT
 
   /* wayland */
   context.wl_display = wl_display_connect(0);
@@ -309,7 +432,9 @@ main(void)
 
   /* memory */
   struct memory_block memory_block = {};
+  // TODO: tune total used memory according to arguments
   memory_block.total = 1 * KILOBYTES;
+  // TODO: check stack memory is enough
   memory_block.block = alloca(memory_block.total);
   bzero(memory_block.block, memory_block.total);
   // mmap(0, (size_t)memory_block.total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -319,14 +444,13 @@ main(void)
     goto wayland_exit;
   }
 
-  struct gamepad *gamepads = mem_push(&memory_block, maxSupportedControllers * sizeof(*gamepads));
+  struct gamepad *gamepads = mem_push(&memory_block, maxGamepadCount * sizeof(*gamepads));
 
-  struct memory_chunk *MemoryForDeviceOpenEvents =
-      mem_push_chunk(&memory_block, sizeof(struct op), maxSupportedControllers);
+  struct memory_chunk *MemoryForDeviceOpenEvents = mem_push_chunk(&memory_block, sizeof(struct op), maxGamepadCount);
   struct memory_chunk *MemoryForJoystickPollEvents =
-      mem_push_chunk(&memory_block, sizeof(struct op_joystick_poll), maxSupportedControllers);
+      mem_push_chunk(&memory_block, sizeof(struct op_joystick_poll), maxGamepadCount);
   struct memory_chunk *MemoryForJoystickReadEvents =
-      mem_push_chunk(&memory_block, sizeof(struct op_joystick_read), maxSupportedControllers);
+      mem_push_chunk(&memory_block, sizeof(struct op_joystick_read), maxGamepadCount);
 
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
   printf("total memory usage (in bytes):  %lu\n", memory_block.used);
@@ -335,7 +459,7 @@ main(void)
 
   /* io_uring */
   struct io_uring ring;
-  if (io_uring_queue_init(maxSupportedControllers + 1 + 1 + 4, &ring, 0)) {
+  if (io_uring_queue_init(maxGamepadCount + 1 + 1 + 4, &ring, 0)) {
     error_code = GAMEPAD_ERROR_IO_URING_SETUP;
     goto wayland_exit;
   }
@@ -471,7 +595,7 @@ main(void)
     stagedOp.triggerMinimum = triggerAbsInfo.minimum;
 
     printf("Input device ID: bus %#x vendor %#x product %#x\n", id.bustype, id.vendor, id.product);
-    stagedOp.gamepad = GamepadGetNotConnected(gamepads, maxSupportedControllers);
+    stagedOp.gamepad = GamepadGetNotConnected(gamepads, maxGamepadCount);
     if (!stagedOp.gamepad) {
       warning("Maximum number of gamepads connected! So not registering this one.\n");
       close(stagedOp.fd);
@@ -687,7 +811,7 @@ main(void)
       stagedOp.triggerMinimum = triggerAbsInfo.minimum;
 
       printf("Input device ID: bus %#x vendor %#x product %#x\n", id.bustype, id.vendor, id.product);
-      stagedOp.gamepad = GamepadGetNotConnected(gamepads, maxSupportedControllers);
+      stagedOp.gamepad = GamepadGetNotConnected(gamepads, maxGamepadCount);
       if (!stagedOp.gamepad) {
         warning("Maximum number of gamepads connected! So not registering this one.\n");
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
@@ -883,9 +1007,9 @@ main(void)
             s32 minimum = op_joystick_poll->stickMinimum;
             s32 range = op_joystick_poll->stickRange;
             f32 normal = (f32)(event->value - minimum) / (f32)range;
-            assert(normal >= 0.0f && normal <= 1.0f);
+            debug_assert(normal >= 0.0f && normal <= 1.0f);
             f32 unit = 2.0f * normal - 1.0f;
-            assert(unit >= -1.0f && unit <= 1.0f);
+            debug_assert(unit >= -1.0f && unit <= 1.0f);
 
             if (event->code == ABS_Y || event->code == ABS_RY)
               unit *= -1;
@@ -895,7 +1019,7 @@ main(void)
                          : event->code == ABS_RX ? &gamepad->rsX
                          : event->code == ABS_RY ? &gamepad->rsY
                                                  : 0;
-            assert(stick);
+            debug_assert(stick);
             *stick = unit;
           } break;
 
@@ -904,10 +1028,10 @@ main(void)
             s32 minimum = op_joystick_poll->triggerMinimum;
             s32 range = op_joystick_poll->triggerRange;
             f32 normal = (f32)(event->value - minimum) / (f32)range;
-            assert(normal >= 0.0f && normal <= 1.0f);
+            debug_assert(normal >= 0.0f && normal <= 1.0f);
 
             f32 *trigger = event->code == ABS_Z ? &gamepad->lt : event->code == ABS_RZ ? &gamepad->rt : 0;
-            assert(trigger);
+            debug_assert(trigger);
             *trigger = normal;
           } break;
           }
@@ -956,7 +1080,7 @@ main(void)
       /* arm timer again */
       sqe = io_uring_get_sqe(&ring);
       struct __kernel_timespec *ts = &(struct __kernel_timespec){
-          .tv_sec = timeout,
+          .tv_nsec = timeout.ns,
       };
       io_uring_prep_timeout(sqe, ts, 0, 0);
       io_uring_sqe_set_data(sqe, &idledOp);
