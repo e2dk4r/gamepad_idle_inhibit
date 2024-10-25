@@ -14,6 +14,8 @@ add_project_arguments(
     '-funroll-loops',
     '-fomit-frame-pointer',
 
+    '-Wno-unused-function',
+
     '-DCOMPILER_GCC=' + (cc.get_id() == 'gcc').to_int().to_string(),
     '-DCOMPILER_CLANG=' + (cc.get_id() == 'clang').to_int().to_string(),
     '-DGAMEPAD_IDLE_INHIBIT_DEBUG=' + is_build_debug.to_int().to_string(),
@@ -34,9 +36,14 @@ sources = files([
 executable(
   'gamepad_idle_inhibit',
   sources: sources + wl_protocols_src,
+  include_directories: 'include',
   dependencies: [
     liburing,
     wayland_client,
   ],
   install: true,
 )
+
+if get_option('test')
+  subdir('test')
+endif

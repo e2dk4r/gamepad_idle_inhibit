@@ -5,37 +5,21 @@
 #include <fcntl.h>
 #include <liburing.h>
 #include <linux/input.h>
-#include <stdio.h>
-#include <string.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <unistd.h>
+
+#include "assert.h"
+#include "memory.h"
+#include "text.h"
+#include "type.h"
 
 // NOTE: CI fix
 #ifndef IORING_ASYNC_CANCEL_ALL
 #define IORING_ASYNC_CANCEL_ALL (1U << 0)
 #endif
-
-#if __has_builtin(__builtin_alloca)
-#define alloca(size) __builtin_alloca(size)
-#else
-#error alloca must be supported
-#endif
-
-#if GAMEPAD_IDLE_INHIBIT_DEBUG
-#define debug_assert(x)                                                                                                \
-  if (!(x)) {                                                                                                          \
-    __builtin_debugtrap();                                                                                             \
-  }
-#else
-#define debug_assert(x)
-#endif
-
-#define runtime_assert(x)                                                                                              \
-  if (!(x)) {                                                                                                          \
-    __builtin_trap();                                                                                                  \
-  }
 
 #define ARRAY_COUNT(array) (sizeof(array) / sizeof(array[0]))
 
@@ -44,20 +28,6 @@
 #define POLLIN 0x001  /* There is data to read.  */
 #define POLLPRI 0x002 /* There is urgent data to read.  */
 #define POLLOUT 0x004 /* Writing now will not block.  */
-
-typedef __INT8_TYPE__ s8;
-typedef __INT16_TYPE__ s16;
-typedef __INT32_TYPE__ s32;
-typedef __INT64_TYPE__ s64;
-
-typedef __UINT8_TYPE__ u8;
-typedef __UINT16_TYPE__ u16;
-typedef __UINT32_TYPE__ u32;
-typedef __UINT64_TYPE__ u64;
-typedef u8 b8;
-
-typedef float f32;
-typedef double f64;
 
 #define OP_DEVICE_OPEN (1 << 0)
 #define OP_JOYSTICK_POLL (1 << 1)
@@ -104,6 +74,11 @@ typedef double f64;
 
 struct op {
   u8 type;
+};
+
+struct op_device_open {
+  u8 type;
+  struct string path;
 };
 
 struct op_global {
@@ -168,6 +143,7 @@ struct op_joystick_poll {
   s32 triggerRange;
   s32 triggerMinimum;
   struct gamepad *gamepad;
+  struct string path;
 };
 
 struct op_joystick_read {
@@ -176,72 +152,9 @@ struct op_joystick_read {
   struct op_joystick_poll *op_joystick_poll;
 };
 
-struct memory_block {
-  void *block;
-  u64 used;
-  u64 total;
-};
-
-struct memory_chunk {
-  void *block;
-  u64 size;
-  u64 max;
-};
-
 #define KILOBYTES (1 << 10)
 #define MEGABYTES (1 << 20)
 #define GIGABYTES (1 << 30)
-
-static void *
-mem_chunk_push(struct memory_chunk *chunk)
-{
-  debug("mem_chunk_push\n");
-  void *result = 0;
-  void *dataBlock = chunk->block + sizeof(u8) * chunk->max;
-  for (u64 index = 0; index < chunk->max; index++) {
-    u8 *flag = chunk->block + sizeof(u8) * index;
-    if (*flag == 0) {
-      result = dataBlock + index * chunk->size;
-      *flag = 1;
-      return result;
-    }
-  }
-
-  return result;
-}
-
-static void
-mem_chunk_pop(struct memory_chunk *chunk, void *block)
-{
-  debug("mem_chunk_pop\n");
-  void *dataBlock = chunk->block + sizeof(u8) * chunk->max;
-  u64 index = (block - dataBlock) / chunk->size;
-  u8 *flag = chunk->block + sizeof(u8) * index;
-  *flag = 0;
-}
-
-static void *
-mem_push(struct memory_block *mem, u64 size)
-{
-  debug_assert(mem->used + size <= mem->total);
-  void *result = mem->block + mem->used;
-  mem->used += size;
-  return result;
-}
-
-static struct memory_chunk *
-mem_push_chunk(struct memory_block *mem, u64 size, u64 max)
-{
-  struct memory_chunk *chunk = mem_push(mem, sizeof(*chunk) + max * sizeof(u8) + max * size);
-  chunk->block = chunk + sizeof(*chunk);
-  chunk->size = size;
-  chunk->max = max;
-  for (u64 index = 0; index < chunk->max; index++) {
-    u8 *flag = chunk->block + sizeof(u8) * index;
-    *flag = 0;
-  }
-  return chunk;
-}
 
 struct wl_context {
   struct wl_display *wl_display;
@@ -255,11 +168,11 @@ static void
 wl_registry_global(void *data, struct wl_registry *wl_registry, u32 name, const char *interface, u32 version)
 {
   struct wl_context *context = data;
-  if (strcmp(interface, wl_compositor_interface.name) == 0) {
-    context->wl_compositor = wl_registry_bind(wl_registry, name, &wl_compositor_interface, version);
-  }
 
-  else if (strcmp(interface, zwp_idle_inhibit_manager_v1_interface.name) == 0) {
+  struct string interfaceString = StringFromZeroTerminated((u8 *)interface, 64);
+  if (IsStringEqual(&interfaceString, &STRING_FROM_ZERO_TERMINATED("wl_compositor"))) {
+    context->wl_compositor = wl_registry_bind(wl_registry, name, &wl_compositor_interface, version);
+  } else if (IsStringEqual(&interfaceString, &STRING_FROM_ZERO_TERMINATED("zwp_idle_inhibit_manager_v1"))) {
     context->zwp_idle_inhibit_manager_v1 =
         wl_registry_bind(wl_registry, name, &zwp_idle_inhibit_manager_v1_interface, version);
   }
@@ -273,38 +186,25 @@ wl_registry_global_remove(void *data, struct wl_registry *wl_registry, u32 name)
 static const struct wl_registry_listener wl_registry_listener = {.global = wl_registry_global,
                                                                  .global_remove = wl_registry_global_remove};
 
-#include "text.h"
-
 int
 main(int argc, char *argv[])
 {
   int error_code = 0;
   struct wl_context context = {};
 
-  struct duration timeout = (struct duration){.ns = 30 * 1e9L};
+  struct duration timeout = DURATION_IN_SECONDS(30);
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
-  timeout = (struct duration){.ns = 3 * 1e9L};
+  timeout = DURATION_IN_SECONDS(3);
 #endif
 
   u32 maxGamepadCount = 4;
 
   // parse commandline arguments
   for (u64 argumentIndex = 1; argumentIndex < argc; argumentIndex++) {
-    struct string argument = StringFromZeroTerminated((u8 *)argv[argumentIndex]);
-
-#define ARGUMENT_STRING(variableName, zeroTerminatedString)                                                            \
-  static struct string variableName = {                                                                                \
-      .data = (u8 *)zeroTerminatedString,                                                                              \
-      .len = sizeof(zeroTerminatedString) - 1,                                                                         \
-  }
-    ARGUMENT_STRING(argumentTimeoutString, "--timeout");
-    ARGUMENT_STRING(argumentMaxGamepadCountString, "--max-gamepad-count");
-    ARGUMENT_STRING(argumentHelpShortString, "-h");
-    ARGUMENT_STRING(argumentHelpString, "--help");
-#undef ARGUMENT_STRING
+    struct string argument = StringFromZeroTerminated((u8 *)argv[argumentIndex], 1024);
 
     // --timeout
-    if (IsStringEqual(&argument, &argumentTimeoutString)) {
+    if (IsStringEqual(&argument, &STRING_FROM_ZERO_TERMINATED("--timeout"))) {
       b8 isArgumentWasLast = argumentIndex + 1 == argc;
       if (isArgumentWasLast) {
         fatal("timeout value is missing\n");
@@ -312,18 +212,16 @@ main(int argc, char *argv[])
       }
 
       argumentIndex++;
-      struct string timeoutString = StringFromZeroTerminated((u8 *)argv[argumentIndex]);
+      struct string timeoutString = StringFromZeroTerminated((u8 *)argv[argumentIndex], 1024);
       struct duration parsed;
-      struct duration oneSecond = (struct duration){.ns = 1 * 1e9L};
-      struct duration oneDay = (struct duration){.ns = 60 * 60 * 24 * 1 * 1e9L};
 
       if (!ParseDuration(&timeoutString, &parsed)) {
         fatal("timeout must be positive number\n");
         return GAMEPAD_ERROR_ARGUMENT_MUST_BE_POSITIVE_NUMBER;
-      } else if (IsDurationLessThan(&parsed, &oneSecond)) {
+      } else if (IsDurationLessThan(&parsed, &DURATION_IN_SECONDS(1))) {
         fatal("timeout must be bigger or equal than 1 second\n");
         return GAMEPAD_ERROR_ARGUMENT_MUST_BE_GRATER;
-      } else if (IsDurationGraterThan(&parsed, &oneDay)) {
+      } else if (IsDurationGraterThan(&parsed, &DURATION_IN_DAYS(1))) {
         fatal("timeout must be less or equal 1 day\n");
         return GAMEPAD_ERROR_ARGUMENT_MUST_BE_LESS;
       }
@@ -332,7 +230,7 @@ main(int argc, char *argv[])
     }
 
     // --max-gamepad-count
-    else if (IsStringEqual(&argument, &argumentMaxGamepadCountString)) {
+    else if (IsStringEqual(&argument, &STRING_FROM_ZERO_TERMINATED("--max-gamepad-count"))) {
       b8 isArgumentWasLast = argumentIndex + 1 == argc;
       if (isArgumentWasLast) {
         fatal("max-gamepad-count value is missing\n");
@@ -340,7 +238,7 @@ main(int argc, char *argv[])
       }
 
       argumentIndex++;
-      struct string maxGamepadCountString = StringFromZeroTerminated((u8 *)argv[argumentIndex]);
+      struct string maxGamepadCountString = StringFromZeroTerminated((u8 *)argv[argumentIndex], 1024);
       if (!ParseU64(&maxGamepadCountString, (u64 *)&maxGamepadCount)) {
         fatal("max-gamepad-count must be positive number\n");
         return GAMEPAD_ERROR_ARGUMENT_MUST_BE_POSITIVE_NUMBER;
@@ -354,18 +252,19 @@ main(int argc, char *argv[])
     }
 
     // -h, --help
-    else if (IsStringEqual(&argument, &argumentHelpShortString) || IsStringEqual(&argument, &argumentHelpString)) {
+    else if (IsStringEqual(&argument, &STRING_FROM_ZERO_TERMINATED("-h")) ||
+             IsStringEqual(&argument, &STRING_FROM_ZERO_TERMINATED("--help"))) {
       static struct string helpString = {
 #define HELP_STRING_TEXT                                                                                               \
-  "NAME: "                                                                                                             \
+  "NAME:"                                                                                                              \
   "\n"                                                                                                                 \
   "  gamepad_idle_inhibit - prevent idling wayland on controllers button presses"                                      \
   "\n\n"                                                                                                               \
-  "SYNOPSIS: "                                                                                                         \
+  "SYNOPSIS:"                                                                                                          \
   "\n"                                                                                                                 \
   "  gamepad_idle_inhibit [OPTION]..."                                                                                 \
   "\n\n"                                                                                                               \
-  "DESCIPTION: "                                                                                                       \
+  "DESCIPTION:"                                                                                                        \
   "\n"                                                                                                                 \
   "  -t, --timeout [1sec,1day]\n"                                                                                      \
   "    How much time need to elapse to idle.\n"                                                                        \
@@ -385,18 +284,18 @@ main(int argc, char *argv[])
   "    How many gamepads need to be tracked.\n"                                                                        \
   "    Default is 4."                                                                                                  \
   "\n\n"
-          .data = (u8 *)HELP_STRING_TEXT,
-          .len = sizeof(HELP_STRING_TEXT) - 1,
+          .value = (u8 *)HELP_STRING_TEXT,
+          .length = sizeof(HELP_STRING_TEXT) - 1,
 #undef HELP_STRING_TEXT
       };
-      write(STDOUT_FILENO, helpString.data, helpString.len);
+      write(STDOUT_FILENO, helpString.value, helpString.length);
       return 0;
     }
 
     // unknown argument
     else {
       write(STDERR_FILENO, "e: Unknown '", 12);
-      write(STDERR_FILENO, argument.data, argument.len);
+      write(STDERR_FILENO, argument.value, argument.length);
       write(STDERR_FILENO, "' argument\n", 11);
       return GAMEPAD_ERROR_ARGUMENT_UNKNOWN;
     }
@@ -430,31 +329,91 @@ main(int argc, char *argv[])
 
   context.wl_surface = wl_compositor_create_surface(context.wl_compositor);
 
-  /* memory */
-  struct memory_block memory_block = {};
+  /* memory
+   *   Select only one option.
+   */
+  struct memory_block memory = {};
   // TODO: tune total used memory according to arguments
-  memory_block.total = 1 * KILOBYTES;
-  // TODO: check stack memory is enough
-  memory_block.block = alloca(memory_block.total);
-  bzero(memory_block.block, memory_block.total);
-  // mmap(0, (size_t)memory_block.total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (!memory_block.block) {
-    fatal("you do not have 1k memory available.\n");
-    error_code = GAMEPAD_ERROR_MEMORY;
-    goto wayland_exit;
+  memory.total = 1 * KILOBYTES;
+
+  // OPTION A - allocate from stack
+  // BUG: allocate from stack
+  //   moving ls,rs on gamepad changes gamepad to invalid address SIGSEGV
+  //   problem fixed when using allocation from RAM (option B) instead of stack allocation.
+  //   reproduce steps:
+  //     1 - stop at memory allocation
+  //     2 - step through to first memcpy stdoutBuffer usage.
+  //         MemoryForDeviceOpenEvents->block will be overwritten.
+  if (0) {
+    // - check limit
+    struct rlimit rlim;
+    if (getrlimit(RLIMIT_STACK, &rlim)) {
+      fatal("cannot check stack limit\n");
+      error_code = GAMEPAD_ERROR_MEMORY;
+      goto wayland_exit;
+    }
+
+    // (lldb) p rlim
+    // (rlimit)  (rlim_cur = 8388608, rlim_max = 18446744073709551615)
+    if (rlim.rlim_cur < (4 * KILOBYTES) + memory.total) {
+      fatal("you do not have 1k memory available.\n");
+      error_code = GAMEPAD_ERROR_MEMORY;
+      goto wayland_exit;
+    }
+
+    // - allocate
+    memory.block = alloca(memory.total);
+
+    // - initialize to zero
+    bzero(memory.block, memory.total);
   }
 
-  struct gamepad *gamepads = mem_push(&memory_block, maxGamepadCount * sizeof(*gamepads));
+  // OPTION B - Allocate from RAM
+  if (1) {
+    memory.block = mmap(0, (size_t)memory.total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (!memory.block) {
+      fatal("you do not have 1k memory available.\n");
+      error_code = GAMEPAD_ERROR_MEMORY;
+      goto wayland_exit;
+    }
+  }
 
-  struct memory_chunk *MemoryForDeviceOpenEvents = mem_push_chunk(&memory_block, sizeof(struct op), maxGamepadCount);
+  struct gamepad *gamepads = MemPush(&memory, maxGamepadCount * sizeof(*gamepads));
+
+  struct memory_chunk *MemoryForDeviceOpenEvents =
+      MemPushChunk(&memory, sizeof(struct op_device_open), maxGamepadCount);
   struct memory_chunk *MemoryForJoystickPollEvents =
-      mem_push_chunk(&memory_block, sizeof(struct op_joystick_poll), maxGamepadCount);
+      MemPushChunk(&memory, sizeof(struct op_joystick_poll), maxGamepadCount);
   struct memory_chunk *MemoryForJoystickReadEvents =
-      mem_push_chunk(&memory_block, sizeof(struct op_joystick_read), maxGamepadCount);
+      MemPushChunk(&memory, sizeof(struct op_joystick_read), maxGamepadCount);
+
+  struct string stdoutBuffer = MemPushString(&memory, 256);
+  struct string stringBuffer = MemPushString(&memory, 32);
 
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
-  printf("total memory usage (in bytes):  %lu\n", memory_block.used);
-  printf("total memory wasted (in bytes): %lu\n", memory_block.total - memory_block.used);
+  {
+    struct string string;
+    u64 length = 0;
+
+#define PRINTLN_U64(prefix, number)                                                                                    \
+  string = STRING_FROM_ZERO_TERMINATED(prefix);                                                                        \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length;                                                                                             \
+  string = FormatU64(&stringBuffer, number);                                                                           \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length;                                                                                             \
+  string = STRING_FROM_ZERO_TERMINATED("\n");                                                                          \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length
+
+    PRINTLN_U64("total memory usage (in bytes):  ", memory.used);
+    PRINTLN_U64("total memory wasted (in bytes): ", memory.total - memory.used);
+#undef PRINTLN_U64
+
+    // print buffered string to output
+    debug_assert(length <= stdoutBuffer.length);
+    write(STDOUT_FILENO, stdoutBuffer.value, length);
+  }
 #endif
 
   /* io_uring */
@@ -528,17 +487,33 @@ main(int argc, char *argv[])
     if (dirent->d_type != DT_CHR)
       continue;
 
-    char *path = dirent->d_name;
-    if (!(path[0] == 'e' && path[1] == 'v' && path[2] == 'e' && path[3] == 'n' && path[4] == 't'))
-      continue;
-
     struct op_joystick_poll stagedOp = {
         .type = OP_JOYSTICK_POLL,
+        .path = StringFromZeroTerminated((u8 *)dirent->d_name, 1024),
     };
+    if (!IsStringStartsWith(&stagedOp.path, &STRING_FROM_ZERO_TERMINATED("event")))
+      continue;
 
-    stagedOp.fd = openat(inputDirFd, path, O_RDONLY | O_NONBLOCK);
+    stagedOp.fd = openat(inputDirFd, (char *)stagedOp.path.value, O_RDONLY | O_NONBLOCK);
     if (stagedOp.fd == -1) {
-      warning("cannot open some event file\n");
+      // warning("cannot open some event file\n");
+      struct string string;
+      u64 length = 0;
+
+      string = STRING_FROM_ZERO_TERMINATED("Cannot open device. event: ");
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      string = stagedOp.path;
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      string = STRING_FROM_ZERO_TERMINATED("\n");
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      debug_assert(length <= stdoutBuffer.length);
+      write(STDOUT_FILENO, stdoutBuffer.value, length);
       continue;
     }
 
@@ -585,7 +560,42 @@ main(int argc, char *argv[])
     stagedOp.triggerRange = triggerAbsInfo.maximum - triggerAbsInfo.minimum;
     stagedOp.triggerMinimum = triggerAbsInfo.minimum;
 
-    printf("Input device ID: bus %#x vendor %#x product %#x\n", id.bustype, id.vendor, id.product);
+    {
+      struct string string;
+      u64 length = 0;
+
+      string = STRING_FROM_ZERO_TERMINATED("Gamepad connected @ bus ");
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      string = FormatHex(&stringBuffer, id.bustype);
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      string = STRING_FROM_ZERO_TERMINATED(" vendor ");
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      string = FormatHex(&stringBuffer, id.vendor);
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      string = STRING_FROM_ZERO_TERMINATED(" product ");
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      string = FormatHex(&stringBuffer, id.product);
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      string = STRING_FROM_ZERO_TERMINATED("\n");
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      debug_assert(length <= stdoutBuffer.length);
+      write(STDOUT_FILENO, stdoutBuffer.value, length);
+    }
+
     stagedOp.gamepad = GamepadGetNotConnected(gamepads, maxGamepadCount);
     if (!stagedOp.gamepad) {
       warning("Maximum number of gamepads connected! So not registering this one.\n");
@@ -595,7 +605,8 @@ main(int argc, char *argv[])
     stagedOp.gamepad->isConnected = 1;
 
     // - Queue poll on gamepad for input event
-    struct op_joystick_poll *submitOp = mem_chunk_push(MemoryForJoystickPollEvents);
+    struct op_joystick_poll *submitOp = MemChunkPush(MemoryForJoystickPollEvents);
+    debug_assert(submitOp);
     *submitOp = stagedOp;
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
     io_uring_prep_poll_add(sqe, submitOp->fd, POLLIN);
@@ -629,9 +640,30 @@ main(int argc, char *argv[])
       if (error == EAGAIN || error == EINTR)
         goto wait;
       fatal("io_uring\n");
+
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
-      printf("errno: %d %s\n", -error, strerror(-error));
+      // printf("errno: %d %s\n", -error, strerror(-error));
+      u64 length = 0;
+      struct string string;
+
+      // see: /usr/include/asm-generic/errno-base.h
+      //      /usr/include/asm-generic/errno.h
+      string = STRING_FROM_ZERO_TERMINATED("errno: ");
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      string = FormatU64(&stdoutBuffer, error);
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      string = STRING_FROM_ZERO_TERMINATED("\n");
+      memcpy(stdoutBuffer.value + length, string.value, string.length);
+      length += string.length;
+
+      debug_assert(length <= stdoutBuffer.length);
+      write(STDOUT_FILENO, stdoutBuffer.value, length);
 #endif
+
       error_code = GAMEPAD_ERROR_IO_URING_WAIT;
       break;
     }
@@ -696,9 +728,13 @@ main(int argc, char *argv[])
       if (event->mask & IN_ISDIR)
         goto cqe_seen;
 
-      char *path = event->name;
-      if (!(path[0] == 'e' && path[1] == 'v' && path[2] == 'e' && path[3] == 'n' && path[4] == 't'))
-        continue;
+      struct op_device_open stagedOp = {
+          .type = OP_DEVICE_OPEN,
+          .path = StringFromZeroTerminated((u8 *)event->name, 1024),
+      };
+
+      if (!IsStringStartsWith(&stagedOp.path, &STRING_FROM_ZERO_TERMINATED("event")))
+        goto cqe_seen;
       // printf("--> %d %s %s\n", event->mask, event->name, path);
 
       // NOTE: When gamepad connects, we have to wait for udev
@@ -712,26 +748,39 @@ main(int argc, char *argv[])
       //   When gamepad disconnects:
       //       0015 event20 mask: IN_ATTRIB
 
-      // TODO: Do not request openat() when gamepad disconnects!
+      // - Do not request openat() when gamepad disconnects!
+      {
+        for (u64 pollEventIndex = 0; pollEventIndex < MemoryForJoystickPollEvents->max; pollEventIndex++) {
+          if (!MemChunkIsDataAvailableAt(MemoryForJoystickPollEvents, pollEventIndex))
+            continue;
+          struct op_joystick_poll *op_joystick_poll = MemChunkGetDataAt(MemoryForJoystickPollEvents, pollEventIndex);
+          if (IsStringEqual(&stagedOp.path, &op_joystick_poll->path))
+            goto cqe_seen;
+        }
+      }
 
       if (!(event->mask & IN_ATTRIB))
         goto cqe_seen;
 
       // - Try to open device
-      struct op *submitOp = mem_chunk_push(MemoryForDeviceOpenEvents);
-      submitOp->type = OP_DEVICE_OPEN;
+      struct op_device_open *submitOp = MemChunkPush(MemoryForDeviceOpenEvents);
+      debug_assert(submitOp);
+      *submitOp = stagedOp;
 
       struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-      io_uring_prep_openat(sqe, inputDirFd, path, O_RDONLY | O_NONBLOCK, 0);
+      io_uring_prep_openat(sqe, inputDirFd, (char *)submitOp->path.value, O_RDONLY | O_NONBLOCK, 0);
       io_uring_sqe_set_data(sqe, submitOp);
       io_uring_submit(&ring);
     }
 
     /* on device open events */
     else if (op->type & OP_DEVICE_OPEN) {
+      struct op_device_open *op = io_uring_cqe_get_data(cqe);
+
       // - Device open event is only one time,
       //   so release used memory
-      mem_chunk_pop(MemoryForDeviceOpenEvents, op);
+      struct string path = op->path;
+      MemChunkPop(MemoryForDeviceOpenEvents, op);
 
       // - When open failed, exit immediately
       b8 isOpenAtFailed = cqe->res < 0;
@@ -742,6 +791,7 @@ main(int argc, char *argv[])
       int fd = cqe->res;
       struct op_joystick_poll stagedOp = {
           .type = OP_JOYSTICK_POLL,
+          .path = path,
           .fd = fd,
       };
 
@@ -801,7 +851,42 @@ main(int argc, char *argv[])
       stagedOp.triggerRange = triggerAbsInfo.maximum - triggerAbsInfo.minimum;
       stagedOp.triggerMinimum = triggerAbsInfo.minimum;
 
-      printf("Input device ID: bus %#x vendor %#x product %#x\n", id.bustype, id.vendor, id.product);
+      {
+        struct string string;
+        u64 length = 0;
+
+        string = STRING_FROM_ZERO_TERMINATED("Gamepad connected @ bus ");
+        memcpy(stdoutBuffer.value + length, string.value, string.length);
+        length += string.length;
+
+        string = FormatHex(&stringBuffer, id.bustype);
+        memcpy(stdoutBuffer.value + length, string.value, string.length);
+        length += string.length;
+
+        string = STRING_FROM_ZERO_TERMINATED(" vendor ");
+        memcpy(stdoutBuffer.value + length, string.value, string.length);
+        length += string.length;
+
+        string = FormatHex(&stringBuffer, id.vendor);
+        memcpy(stdoutBuffer.value + length, string.value, string.length);
+        length += string.length;
+
+        string = STRING_FROM_ZERO_TERMINATED(" product ");
+        memcpy(stdoutBuffer.value + length, string.value, string.length);
+        length += string.length;
+
+        string = FormatHex(&stringBuffer, id.product);
+        memcpy(stdoutBuffer.value + length, string.value, string.length);
+        length += string.length;
+
+        string = STRING_FROM_ZERO_TERMINATED("\n");
+        memcpy(stdoutBuffer.value + length, string.value, string.length);
+        length += string.length;
+
+        debug_assert(length <= stdoutBuffer.length);
+        write(STDOUT_FILENO, stdoutBuffer.value, length);
+      }
+
       stagedOp.gamepad = GamepadGetNotConnected(gamepads, maxGamepadCount);
       if (!stagedOp.gamepad) {
         warning("Maximum number of gamepads connected! So not registering this one.\n");
@@ -814,7 +899,8 @@ main(int argc, char *argv[])
       stagedOp.gamepad->isConnected = 1;
 
       // - Queue poll on gamepad for input event
-      struct op_joystick_poll *submitOp = mem_chunk_push(MemoryForJoystickPollEvents);
+      struct op_joystick_poll *submitOp = MemChunkPush(MemoryForJoystickPollEvents);
+      debug_assert(submitOp);
       *submitOp = stagedOp;
       struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
       io_uring_prep_poll_add(sqe, submitOp->fd, POLLIN);
@@ -847,11 +933,11 @@ main(int argc, char *argv[])
         io_uring_sqe_set_data(sqe, 0);
         io_uring_submit(&ring);
 
-        //   2 - Release resources
-        mem_chunk_pop(MemoryForJoystickPollEvents, op);
-
-        //   3 - Disconnect virtual gamepad
+        //   2 - Disconnect virtual gamepad
         op->gamepad->isConnected = 0;
+
+        //   3 - Release resources
+        MemChunkPop(MemoryForJoystickPollEvents, op);
 
         //   4 - Stop trying to queue read joystick event
         goto cqe_seen;
@@ -864,7 +950,8 @@ main(int argc, char *argv[])
       };
 
       //   - Acquire memory for read event
-      struct op_joystick_read *submitOp = mem_chunk_push(MemoryForJoystickReadEvents);
+      struct op_joystick_read *submitOp = MemChunkPush(MemoryForJoystickReadEvents);
+      debug_assert(submitOp);
       *submitOp = stagedOp;
 
       //   - Queue read event
@@ -893,14 +980,14 @@ main(int argc, char *argv[])
           io_uring_sqe_set_data(sqe, 0);
           io_uring_submit(&ring);
 
-          //   2 - Release resources
-          mem_chunk_pop(MemoryForJoystickPollEvents, op_joystick_poll);
-          mem_chunk_pop(MemoryForJoystickReadEvents, op);
-
-          //   4 - Disconnect virtual gamepad
+          //   2 - Disconnect virtual gamepad
           op_joystick_poll->gamepad->isConnected = 0;
 
-          //   3 - Stop polling on file descriptor
+          //   3 - Release resources
+          MemChunkPop(MemoryForJoystickPollEvents, op_joystick_poll);
+          MemChunkPop(MemoryForJoystickReadEvents, op);
+
+          //   4 - Stop polling on file descriptor
           goto cqe_seen;
         }
 
@@ -913,7 +1000,7 @@ main(int argc, char *argv[])
         io_uring_submit(&ring);
 
         //   2 - Release resources
-        mem_chunk_pop(MemoryForJoystickReadEvents, op);
+        MemChunkPop(MemoryForJoystickReadEvents, op);
 
         //   3 - Stop trying to read joystick another event
         goto cqe_seen;
@@ -923,8 +1010,8 @@ main(int argc, char *argv[])
       struct input_event *event = &op->event;
 
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
-      printf("%p fd: %d time: %ld.%ld type: %d code: %d value: %d\n", op, op_joystick_poll->fd, event->input_event_sec,
-             event->input_event_usec, event->type, event->code, event->value);
+      // printf("%p fd: %d time: %ldsec%ldus type: %d code: %d value: %d\n", op, op_joystick_poll->fd,
+      //        event->input_event_sec, event->input_event_usec, event->type, event->code, event->value);
 #endif
       struct gamepad *gamepad = op_joystick_poll->gamepad;
       if (event->type == EV_SYN) {
@@ -1028,23 +1115,88 @@ main(int argc, char *argv[])
           }
         }
 
-        printf("Gamepad #%p a: %d b: %d x: %d y: %d ls: %d %.2f,%.2f rs: %d %.2f,%.2f lb: %d lt: %.2f rb: %d rt: %.2f "
-               "home: %d back: %d start: %d\n",
-               // pointer
-               gamepad,
-               // buttons
-               gamepad->a, gamepad->b, gamepad->x, gamepad->y,
-               // left stick
-               gamepad->ls, gamepad->lsX, gamepad->lsY,
-               // right stick
-               gamepad->rs, gamepad->rsX, gamepad->rsY,
-               // left button, left trigger
-               gamepad->lb, gamepad->lt,
-               // right button, right trigger
-               gamepad->rb, gamepad->rt,
-               // buttons
-               gamepad->home, gamepad->back, gamepad->start);
+        struct string string;
+        u64 length = 0;
+
+        string = STRING_FROM_ZERO_TERMINATED("Gamepad #");
+        memcpy(stdoutBuffer.value + length, string.value, string.length);
+        length += string.length;
+
+        string = FormatHex(&stringBuffer, (u64)&gamepad);
+        memcpy(stdoutBuffer.value + length, string.value, string.length);
+        length += string.length;
+
+#define PRINT_BUTTON(prefix, button)                                                                                   \
+  string = STRING_FROM_ZERO_TERMINATED(" " prefix ": ");                                                               \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length;                                                                                             \
+  string = FormatU64(&stringBuffer, gamepad->button);                                                                  \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length
+
+#define PRINT_ANALOG(prefix, stick, stickX, stickY)                                                                    \
+  string = STRING_FROM_ZERO_TERMINATED(" " prefix ": ");                                                               \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length;                                                                                             \
+  string = FormatU64(&stringBuffer, gamepad->stick);                                                                   \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length;                                                                                             \
+  string = STRING_FROM_ZERO_TERMINATED(" ");                                                                           \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length;                                                                                             \
+  string = FormatF32(&stringBuffer, gamepad->stickX, 2);                                                               \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length;                                                                                             \
+  string = STRING_FROM_ZERO_TERMINATED(",");                                                                           \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length;                                                                                             \
+  string = FormatF32(&stringBuffer, gamepad->stickY, 2);                                                               \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length
+
+#define PRINT_TRIGGER(prefix, trigger)                                                                                 \
+  string = STRING_FROM_ZERO_TERMINATED(" " prefix ": ");                                                               \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length;                                                                                             \
+  string = FormatF32(&stringBuffer, gamepad->trigger, 2);                                                              \
+  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
+  length += string.length
+
+        PRINT_BUTTON("a", a);
+        PRINT_BUTTON("b", b);
+        PRINT_BUTTON("x", x);
+        PRINT_BUTTON("y", y);
+
+        PRINT_ANALOG("ls", ls, lsX, lsY);
+        PRINT_ANALOG("rs", rs, rsX, rsY);
+
+        PRINT_BUTTON("lb", lb);
+        PRINT_TRIGGER("lt", lt);
+
+        PRINT_BUTTON("rb", rb);
+        PRINT_TRIGGER("rt", rt);
+
+        PRINT_BUTTON("home", home);
+        PRINT_BUTTON("back", back);
+        PRINT_BUTTON("start", start);
+
+        string = STRING_FROM_ZERO_TERMINATED("\n");
+        memcpy(stdoutBuffer.value + length, string.value, string.length);
+        length += string.length;
+
+        debug_assert(length <= stdoutBuffer.length);
+        write(STDOUT_FILENO, stdoutBuffer.value, length);
+
+#undef PRINT_BUTTON
+#undef PRINT_ANALOG
+#undef PRINT_TRIGGER
       }
+
+      // DEBUG: get file path from file descriptor
+      // char path[256];
+      // snprintf(path, sizeof(path), "/proc/self/fd/%d", op_joystick_poll->fd);
+      // readlink(path, path, sizeof(path));
+      // printf("fd: %d path: %s\n", op_joystick_poll->fd, path);
 
       // NOTE: When there is more data to read
       //   1 - Try to read another joystick event
