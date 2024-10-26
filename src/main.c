@@ -59,12 +59,10 @@ typedef u8 b8;
 typedef float f32;
 typedef double f64;
 
-#define OP_INOTIFY_WATCH (1 << 0)
-#define OP_DEVICE_OPEN (1 << 1)
-#define OP_JOYSTICK_POLL (1 << 2)
-#define OP_JOYSTICK_READ (1 << 3)
-#define OP_WAYLAND (1 << 4)
-#define OP_IDLED (1 << 5)
+#define OP_DEVICE_OPEN (1 << 0)
+#define OP_JOYSTICK_POLL (1 << 1)
+#define OP_JOYSTICK_READ (1 << 2)
+#define OP_IDLED (1 << 3)
 
 #define GAMEPAD_ERROR_IO_URING_SETUP 1
 #define GAMEPAD_ERROR_IO_URING_WAIT 2
@@ -108,8 +106,10 @@ struct op {
   u8 type;
 };
 
+struct op_global {
+};
+
 struct op_inotify_watch {
-  u8 type;
   int fd;
 };
 
@@ -465,10 +465,7 @@ main(int argc, char *argv[])
   }
 
   /* notify when on wayland events */
-  struct op waylandOp = {
-      .type = OP_WAYLAND,
-  };
-
+  struct op_global waylandOp = {};
   {
     int wlDisplayFd = wl_display_get_fd(context.wl_display);
     if (wlDisplayFd == -1) {
@@ -482,26 +479,20 @@ main(int argc, char *argv[])
   }
 
   /* notify when a new input added */
-  struct op_inotify_watch inotifyOp = {
-      .type = OP_INOTIFY_WATCH,
-  };
-
-  int inotifyFd;
-  int inotifyWatchFd;
+  struct op_inotify_watch inotifyOp = {};
   {
-    inotifyFd = inotify_init1(IN_NONBLOCK);
-    if (inotifyFd == -1) {
+    inotifyOp.fd = inotify_init1(IN_NONBLOCK);
+    if (inotifyOp.fd == -1) {
       error_code = GAMEPAD_ERROR_INOTIFY_SETUP;
       goto io_uring_exit;
     }
 
-    inotifyWatchFd = inotify_add_watch(inotifyFd, "/dev/input", IN_CREATE | IN_ATTRIB);
+    int inotifyWatchFd = inotify_add_watch(inotifyOp.fd, "/dev/input", IN_CREATE | IN_ATTRIB);
     if (inotifyWatchFd == -1) {
       error_code = GAMEPAD_ERROR_INOTIFY_WATCH_SETUP;
       goto inotify_exit;
     }
 
-    inotifyOp.fd = inotifyFd;
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
     io_uring_prep_poll_multishot(sqe, inotifyOp.fd, POLLIN);
     io_uring_sqe_set_data(sqe, &inotifyOp);
@@ -651,11 +642,11 @@ main(int argc, char *argv[])
     if (op == 0)
       goto cqe_seen;
 
-    if (!(op->type & OP_WAYLAND))
+    if ((void *)op != &waylandOp)
       wl_display_cancel_read(context.wl_display);
 
     /* on wayland events */
-    if (op->type & OP_WAYLAND) {
+    if ((void *)op == &waylandOp) {
       int revents = cqe->res;
 
       if (revents & POLLIN) {
@@ -666,7 +657,7 @@ main(int argc, char *argv[])
     }
 
     /* on inotify events */
-    else if (op->type & OP_INOTIFY_WATCH) {
+    else if ((void *)op == &inotifyOp) {
       struct op_inotify_watch *op = io_uring_cqe_get_data(cqe);
 
       // NOTE: If inotify fails, we finish program with error
@@ -1112,7 +1103,7 @@ main(int argc, char *argv[])
   }
 
 inotify_exit:
-  close(inotifyFd);
+  close(inotifyOp.fd);
 
 io_uring_exit:
   io_uring_queue_exit(&ring);
