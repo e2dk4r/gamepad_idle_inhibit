@@ -74,7 +74,7 @@ static struct memory_chunk *
 MemPushChunk(struct memory_block *mem, u64 size, u64 max)
 {
   struct memory_chunk *chunk = MemPush(mem, sizeof(*chunk) + max * sizeof(u8) + max * size);
-  chunk->block = chunk + sizeof(*chunk);
+  chunk->block = (u8*)chunk + sizeof(*chunk);
   chunk->size = size;
   chunk->max = max;
   for (u64 index = 0; index < chunk->max; index++) {

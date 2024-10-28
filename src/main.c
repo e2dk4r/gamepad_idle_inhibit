@@ -337,14 +337,7 @@ main(int argc, char *argv[])
   memory.total = 1 * KILOBYTES;
 
   // OPTION A - allocate from stack
-  // BUG: allocate from stack
-  //   moving ls,rs on gamepad changes gamepad to invalid address SIGSEGV
-  //   problem fixed when using allocation from RAM (option B) instead of stack allocation.
-  //   reproduce steps:
-  //     1 - stop at memory allocation
-  //     2 - step through to first memcpy stdoutBuffer usage.
-  //         MemoryForDeviceOpenEvents->block will be overwritten.
-  if (0) {
+  if (1) {
     // - check limit
     struct rlimit rlim;
     if (getrlimit(RLIMIT_STACK, &rlim)) {
@@ -369,7 +362,7 @@ main(int argc, char *argv[])
   }
 
   // OPTION B - Allocate from RAM
-  if (1) {
+  else {
     memory.block = mmap(0, (size_t)memory.total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (!memory.block) {
       fatal("you do not have 1k memory available.\n");
@@ -396,13 +389,13 @@ main(int argc, char *argv[])
     u64 length = 0;
 
 #define PRINTLN_U64(prefix, number)                                                                                    \
-  string = STRING_FROM_ZERO_TERMINATED(prefix);                                                                        \
+  string = (struct string){.value = (u8 *)prefix, .length = sizeof(prefix) - 1};                                       \
   memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
   length += string.length;                                                                                             \
   string = FormatU64(&stringBuffer, number);                                                                           \
   memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
   length += string.length;                                                                                             \
-  string = STRING_FROM_ZERO_TERMINATED("\n");                                                                          \
+  string = (struct string){.value = (u8 *)"\n", .length = 1};                                                          \
   memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
   length += string.length
 
