@@ -11,6 +11,7 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include "StringBuilder.h"
 #include "assert.h"
 #include "memory.h"
 #include "text.h"
@@ -382,30 +383,22 @@ main(int argc, char *argv[])
 
   struct string stdoutBuffer = MemPushString(&memory, 256);
   struct string stringBuffer = MemPushString(&memory, 32);
+  struct string_builder stringBuilder = (struct string_builder){
+      .outBuffer = &stdoutBuffer,
+      .stringBuffer = &stringBuffer,
+  };
 
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
   {
-    struct string string;
-    u64 length = 0;
+    StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("total memory usage (in bytes):  "));
+    StringBuilderAppendU64(&stringBuilder, memory.used);
+    StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("\n"));
 
-#define PRINTLN_U64(prefix, number)                                                                                    \
-  string = STRING_FROM_ZERO_TERMINATED(prefix);                                                                        \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length;                                                                                             \
-  string = FormatU64(&stringBuffer, number);                                                                           \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length;                                                                                             \
-  string = STRING_FROM_ZERO_TERMINATED("\n");                                                                          \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length
-
-    PRINTLN_U64("total memory usage (in bytes):  ", memory.used);
-    PRINTLN_U64("total memory wasted (in bytes): ", memory.total - memory.used);
-#undef PRINTLN_U64
-
-    // print buffered string to output
-    debug_assert(length <= stdoutBuffer.length);
-    write(STDOUT_FILENO, stdoutBuffer.value, length);
+    StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("total memory wasted (in bytes): "));
+    StringBuilderAppendU64(&stringBuilder, memory.total - memory.used);
+    StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("\n"));
+    struct string string = StringBuilderFlush(&stringBuilder);
+    write(STDOUT_FILENO, string.value, string.length);
   }
 #endif
 
@@ -490,23 +483,12 @@ main(int argc, char *argv[])
     stagedOp.fd = openat(inputDirFd, (char *)stagedOp.path.value, O_RDONLY | O_NONBLOCK);
     if (stagedOp.fd == -1) {
       // warning("cannot open some event file\n");
-      struct string string;
-      u64 length = 0;
+      StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("Cannot open device. event: "));
+      StringBuilderAppendString(&stringBuilder, &stagedOp.path);
+      StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("\n"));
 
-      string = STRING_FROM_ZERO_TERMINATED("Cannot open device. event: ");
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
-
-      string = stagedOp.path;
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
-
-      string = STRING_FROM_ZERO_TERMINATED("\n");
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
-
-      debug_assert(length <= stdoutBuffer.length);
-      write(STDOUT_FILENO, stdoutBuffer.value, length);
+      struct string string = StringBuilderFlush(&stringBuilder);
+      write(STDOUT_FILENO, string.value, string.length);
       continue;
     }
 
@@ -554,39 +536,18 @@ main(int argc, char *argv[])
     stagedOp.triggerMinimum = triggerAbsInfo.minimum;
 
     {
-      struct string string;
-      u64 length = 0;
+      StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("Gamepad connected @ bus "));
+      StringBuilderAppendHex(&stringBuilder, id.bustype);
 
-      string = STRING_FROM_ZERO_TERMINATED("Gamepad connected @ bus ");
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
+      StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED(" vendor "));
+      StringBuilderAppendHex(&stringBuilder, id.vendor);
 
-      string = FormatHex(&stringBuffer, id.bustype);
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
+      StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED(" product "));
+      StringBuilderAppendHex(&stringBuilder, id.product);
 
-      string = STRING_FROM_ZERO_TERMINATED(" vendor ");
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
-
-      string = FormatHex(&stringBuffer, id.vendor);
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
-
-      string = STRING_FROM_ZERO_TERMINATED(" product ");
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
-
-      string = FormatHex(&stringBuffer, id.product);
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
-
-      string = STRING_FROM_ZERO_TERMINATED("\n");
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
-
-      debug_assert(length <= stdoutBuffer.length);
-      write(STDOUT_FILENO, stdoutBuffer.value, length);
+      StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("\n"));
+      struct string string = StringBuilderFlush(&stringBuilder);
+      write(STDOUT_FILENO, string.value, string.length);
     }
 
     stagedOp.gamepad = GamepadGetNotConnected(gamepads, maxGamepadCount);
@@ -636,25 +597,15 @@ main(int argc, char *argv[])
 
 #if GAMEPAD_IDLE_INHIBIT_DEBUG
       // printf("errno: %d %s\n", -error, strerror(-error));
-      u64 length = 0;
-      struct string string;
 
       // see: /usr/include/asm-generic/errno-base.h
       //      /usr/include/asm-generic/errno.h
-      string = STRING_FROM_ZERO_TERMINATED("errno: ");
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
+      StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("errno: "));
+      StringBuilderAppendU64(&stringBuilder, error);
+      StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("\n"));
 
-      string = FormatU64(&stdoutBuffer, error);
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
-
-      string = STRING_FROM_ZERO_TERMINATED("\n");
-      memcpy(stdoutBuffer.value + length, string.value, string.length);
-      length += string.length;
-
-      debug_assert(length <= stdoutBuffer.length);
-      write(STDOUT_FILENO, stdoutBuffer.value, length);
+      struct string string = StringBuilderFlush(&stringBuilder);
+      write(STDOUT_FILENO, string.value, string.length);
 #endif
 
       error_code = GAMEPAD_ERROR_IO_URING_WAIT;
@@ -845,39 +796,18 @@ main(int argc, char *argv[])
       stagedOp.triggerMinimum = triggerAbsInfo.minimum;
 
       {
-        struct string string;
-        u64 length = 0;
+        StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("Gamepad connected @ bus "));
+        StringBuilderAppendHex(&stringBuilder, id.bustype);
 
-        string = STRING_FROM_ZERO_TERMINATED("Gamepad connected @ bus ");
-        memcpy(stdoutBuffer.value + length, string.value, string.length);
-        length += string.length;
+        StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED(" vendor "));
+        StringBuilderAppendHex(&stringBuilder, id.vendor);
 
-        string = FormatHex(&stringBuffer, id.bustype);
-        memcpy(stdoutBuffer.value + length, string.value, string.length);
-        length += string.length;
+        StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED(" product "));
+        StringBuilderAppendHex(&stringBuilder, id.product);
 
-        string = STRING_FROM_ZERO_TERMINATED(" vendor ");
-        memcpy(stdoutBuffer.value + length, string.value, string.length);
-        length += string.length;
-
-        string = FormatHex(&stringBuffer, id.vendor);
-        memcpy(stdoutBuffer.value + length, string.value, string.length);
-        length += string.length;
-
-        string = STRING_FROM_ZERO_TERMINATED(" product ");
-        memcpy(stdoutBuffer.value + length, string.value, string.length);
-        length += string.length;
-
-        string = FormatHex(&stringBuffer, id.product);
-        memcpy(stdoutBuffer.value + length, string.value, string.length);
-        length += string.length;
-
-        string = STRING_FROM_ZERO_TERMINATED("\n");
-        memcpy(stdoutBuffer.value + length, string.value, string.length);
-        length += string.length;
-
-        debug_assert(length <= stdoutBuffer.length);
-        write(STDOUT_FILENO, stdoutBuffer.value, length);
+        StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("\n"));
+        struct string string = StringBuilderFlush(&stringBuilder);
+        write(STDOUT_FILENO, string.value, string.length);
       }
 
       stagedOp.gamepad = GamepadGetNotConnected(gamepads, maxGamepadCount);
@@ -1108,81 +1038,50 @@ main(int argc, char *argv[])
           }
         }
 
-        struct string string;
-        u64 length = 0;
+        StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("Gamepad #"));
+        StringBuilderAppendHex(&stringBuilder, (u64)&gamepad);
 
-        string = STRING_FROM_ZERO_TERMINATED("Gamepad #");
-        memcpy(stdoutBuffer.value + length, string.value, string.length);
-        length += string.length;
+#define STRING_BUILDER_APPEND_BUTTON(prefix, button)                                                                   \
+  StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED(" " prefix " "));                             \
+  StringBuilderAppendU64(&stringBuilder, gamepad->button)
 
-        string = FormatHex(&stringBuffer, (u64)&gamepad);
-        memcpy(stdoutBuffer.value + length, string.value, string.length);
-        length += string.length;
+#define STRING_BUILDER_APPEND_ANALOG(prefix, stick, stickX, stickY)                                                    \
+  StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED(" " prefix " "));                             \
+  StringBuilderAppendU64(&stringBuilder, gamepad->stick);                                                              \
+  StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED(" "));                                        \
+  StringBuilderAppendF32(&stringBuilder, gamepad->stickX, 2);                                                          \
+  StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED(","));                                        \
+  StringBuilderAppendF32(&stringBuilder, gamepad->stickY, 2)
 
-#define PRINT_BUTTON(prefix, button)                                                                                   \
-  string = STRING_FROM_ZERO_TERMINATED(" " prefix ": ");                                                               \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length;                                                                                             \
-  string = FormatU64(&stringBuffer, gamepad->button);                                                                  \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length
+#define STRING_BUILDER_APPEND_TRIGGER(prefix, trigger)                                                                 \
+  StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED(" " prefix " "));                             \
+  StringBuilderAppendF32(&stringBuilder, gamepad->trigger, 2)
 
-#define PRINT_ANALOG(prefix, stick, stickX, stickY)                                                                    \
-  string = STRING_FROM_ZERO_TERMINATED(" " prefix ": ");                                                               \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length;                                                                                             \
-  string = FormatU64(&stringBuffer, gamepad->stick);                                                                   \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length;                                                                                             \
-  string = STRING_FROM_ZERO_TERMINATED(" ");                                                                           \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length;                                                                                             \
-  string = FormatF32(&stringBuffer, gamepad->stickX, 2);                                                               \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length;                                                                                             \
-  string = STRING_FROM_ZERO_TERMINATED(",");                                                                           \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length;                                                                                             \
-  string = FormatF32(&stringBuffer, gamepad->stickY, 2);                                                               \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length
+        STRING_BUILDER_APPEND_BUTTON("a", a);
+        STRING_BUILDER_APPEND_BUTTON("b", b);
+        STRING_BUILDER_APPEND_BUTTON("x", x);
+        STRING_BUILDER_APPEND_BUTTON("y", y);
 
-#define PRINT_TRIGGER(prefix, trigger)                                                                                 \
-  string = STRING_FROM_ZERO_TERMINATED(" " prefix ": ");                                                               \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length;                                                                                             \
-  string = FormatF32(&stringBuffer, gamepad->trigger, 2);                                                              \
-  memcpy(stdoutBuffer.value + length, string.value, string.length);                                                    \
-  length += string.length
+        STRING_BUILDER_APPEND_ANALOG("ls", ls, lsX, lsY);
+        STRING_BUILDER_APPEND_ANALOG("rs", rs, rsX, rsY);
 
-        PRINT_BUTTON("a", a);
-        PRINT_BUTTON("b", b);
-        PRINT_BUTTON("x", x);
-        PRINT_BUTTON("y", y);
+        STRING_BUILDER_APPEND_BUTTON("lb", lb);
+        STRING_BUILDER_APPEND_TRIGGER("lt", lt);
 
-        PRINT_ANALOG("ls", ls, lsX, lsY);
-        PRINT_ANALOG("rs", rs, rsX, rsY);
+        STRING_BUILDER_APPEND_BUTTON("rb", rb);
+        STRING_BUILDER_APPEND_TRIGGER("rt", rt);
 
-        PRINT_BUTTON("lb", lb);
-        PRINT_TRIGGER("lt", lt);
+        STRING_BUILDER_APPEND_BUTTON("home", home);
+        STRING_BUILDER_APPEND_BUTTON("back", back);
+        STRING_BUILDER_APPEND_BUTTON("start", start);
 
-        PRINT_BUTTON("rb", rb);
-        PRINT_TRIGGER("rt", rt);
+#undef STRING_BUILDER_APPEND_ANALOG
+#undef STRING_BUILDER_APPEND_TRIGGER
+#undef STRING_BUILDER_APPEND_BUTTON
 
-        PRINT_BUTTON("home", home);
-        PRINT_BUTTON("back", back);
-        PRINT_BUTTON("start", start);
-
-        string = STRING_FROM_ZERO_TERMINATED("\n");
-        memcpy(stdoutBuffer.value + length, string.value, string.length);
-        length += string.length;
-
-        debug_assert(length <= stdoutBuffer.length);
-        write(STDOUT_FILENO, stdoutBuffer.value, length);
-
-#undef PRINT_BUTTON
-#undef PRINT_ANALOG
-#undef PRINT_TRIGGER
+        StringBuilderAppendString(&stringBuilder, &STRING_FROM_ZERO_TERMINATED("\n"));
+        struct string string = StringBuilderFlush(&stringBuilder);
+        write(STDOUT_FILENO, string.value, string.length);
       }
 
       // DEBUG: get file path from file descriptor

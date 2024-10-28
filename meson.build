@@ -14,6 +14,7 @@ add_project_arguments(
     '-funroll-loops',
     '-fomit-frame-pointer',
 
+    '-Wno-unused-result',
     '-Wno-unused-function',
 
     '-DCOMPILER_GCC=' + (cc.get_id() == 'gcc').to_int().to_string(),
