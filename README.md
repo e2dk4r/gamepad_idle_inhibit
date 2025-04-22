@@ -1,5 +1,9 @@
 # gamepad_idle_inhibit
 
+After
+[cc482228a41e9e3e31b6b27143d5ed24e7dc5069](https://github.com/swaywm/sway/commit/cc482228a41e9e3e31b6b27143d5ed24e7dc5069)
+commit, it no longer works on sway (>=v1.11-rc1). You can revert it manually then compile.
+
 Prevent idling for 30 seconds on any gamepad events on wayland.
 
 For this to work your wayland compositor must support "idle-inhibit-unstable-v1".
